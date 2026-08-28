@@ -23,6 +23,7 @@ classifiers = [
 ]
 dependencies = [
     "numpy>=1.21",
+    "lifelines>=0.27",
 ]
 
 [project.optional-dependencies]
