@@ -33,3 +33,6 @@ tags
 
 # Notebooks
 .ipynb_checkpoints/
+
+# Local scratch / exploration
+scratch/
