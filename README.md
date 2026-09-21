@@ -1,40 +1,14 @@
-# ECindex
-
-<One-line description of what the library does.>
-
-## Installation
-
-```bash
-pip install ecindex
-```
-
-From a local checkout:
-
-```bash
-pip install -e ".[dev]"
-```
+# Maximum Expected Cindex
 
 ## Usage
 
 ```python
-from ecindex import ec_index
+import ecindex
 
-ec_index([1.0, 2.0, 3.0])
+durations = np.array([5, 6, 6, 2, 4, 4])
+observed = np.array([1, 0, 1, 1, 1, 0])
+C = observed == 1 # censoring flags: True if event observed, False if censored
+
+# returns  expected c-index + sorted non-censored events with corresponding hazards and weights.
+ec, events, hazards, weights = ecindex.ecindex(durations, C, t_star = np.max(durations)+1)
 ```
-
-## Development
-
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-
-pytest            # tests
-ruff check .      # lint
-ruff format .     # format
-mypy              # type check
-```
-
-## License
-
-MIT — see [LICENSE](LICENSE).
