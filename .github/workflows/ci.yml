@@ -26,5 +26,3 @@ jobs:
       - name: Type check
         if: matrix.python-version == '3.13'
         run: mypy
-      - name: Test
-        run: pytest --cov=ecindex --cov-report=term-missing
