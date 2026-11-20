@@ -144,3 +144,6 @@ def ecindex(T, C, S=None, t_star=None, use_median=False):
         numerator += np.sum(weights[i] * weights[i + 1 :] * ratio)
         denominator += np.sum(weights[i] * weights[i + 1 :])
     return numerator / denominator, events, hazards, weights
+
+
+
