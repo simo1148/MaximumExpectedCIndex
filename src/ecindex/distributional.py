@@ -369,3 +369,65 @@ def estimation_gamma_weibull_groups(Y, ipcw_weights, Sub, k0s, lambda0, a0,
     ks, thetas, lam, a = unpack(result.x)
     gammas = {g: GammaParams(k=ks[j], theta=thetas[j]) for j, g in enumerate(groups)}
     return gammas, WeibullParams(alpha=a, lambda_=lam)
+
+
+def ecindex_gamma_mc(gammas, sub_weights, num_samples=1000, group = None):
+    aux = []
+    while len(aux) < num_samples:
+      if group is None:
+        t1 = np.random.choice(list(sub_weights.keys()), p=list(sub_weights.values()))
+        t2 = np.random.choice(list(sub_weights.keys()), p=list(sub_weights.values()))
+      else:
+        t1 = group
+        t2 = np.random.choice(list(sub_weights.keys()), p=list(sub_weights.values()))
+      
+      v1 = np.random.gamma(gammas[t1].k, gammas[t1].theta)
+      v2 = np.random.gamma(gammas[t2].k, gammas[t2].theta)
+      if v1 > v2:
+        aux.append(v1/(v1+v2))
+      else:
+        aux.append(v2/(v1+v2))
+    return np.mean(aux)
+
+def ecindex_distribution_groups(T, C, Sub, num_samples=100,
+                         fraction_initialization=0.7, J=20, mc_samples=1000, group = None):
+    """
+    Draws num_samples estimates of the expected c-index, each from its own random initialization.
+    - T are the observed times, C the event indicator.
+    - cumulative_baseline_hazard, if given, transforms T so the baseline is known and only the gamma
+      has to be estimated. If None the baseline is taken to be an unknown weibull.
+    - num_samples is the number of random initializations, ie the size of the returned sample.
+    - fraction_initialization is the subset fraction used by the initializers.
+    Returns the sample of expected c-indices and the matching gamma parameters.
+    - J is the number of quantiles used in the estimation. Requires J >= 2.
+    - mc_samples is the number of samples used to estimate the expected c-index using Monte Carlo.
+    - group: use to calculate expected cindex of an specific group.
+    TODO: Implement with known cumulative baseline hazard.
+    """
+    gamma_params = []
+    ecindex_samples = []
+    G_fitter = KaplanMeierFitter()
+    G_fitter.fit(durations=T, event_observed=(1 - C))
+    G_times = G_fitter.survival_function_at_times(T).to_numpy()
+    ipcw_weights = C/G_times
+    
+    groups = list(np.unique(Sub))
+    sub_weights = {i: np.mean(Sub==i) for i in groups}
+
+
+    # Administrative censoring to 0.
+    mask = np.isnan(ipcw_weights)
+    ipcw_weights[mask] = 0
+
+
+    for _ in range(num_samples):
+        # Randomly initialize parameters
+        k0s, lam0, a0, th0s = random_initialization_gamma_weibull_groups(Y, ipcw_weights, Sub)
+        # Estimate parameters
+        gammas, weibull = estimation_gamma_weibull_groups(Y, ipcw_weights, Sub, k0s, lam0, a0, theta0s=th0s)            
+        
+        gamma_params.append(gammas)
+        # Calculate expected C-index
+        ecindex_samples.append(ecindex_gamma_mc(gammas, sub_weights, num_samples=mc_samples, group = group))
+
+    return ecindex_samples, gamma_params
