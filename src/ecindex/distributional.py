@@ -422,9 +422,9 @@ def ecindex_distribution_groups(T, C, Sub, num_samples=100,
 
     for _ in range(num_samples):
         # Randomly initialize parameters
-        k0s, lam0, a0, th0s = random_initialization_gamma_weibull_groups(Y, ipcw_weights, Sub)
+        k0s, lam0, a0, th0s = random_initialization_gamma_weibull_groups(T, ipcw_weights, Sub, subset_frac=fraction_initialization)
         # Estimate parameters
-        gammas, weibull = estimation_gamma_weibull_groups(Y, ipcw_weights, Sub, k0s, lam0, a0, theta0s=th0s)            
+        gammas, weibull = estimation_gamma_weibull_groups(T, ipcw_weights, Sub, k0s, lam0, a0, theta0s=th0s, J=J)            
         
         gamma_params.append(gammas)
         # Calculate expected C-index
