@@ -383,7 +383,9 @@ def ecindex_gamma_mc(gammas, sub_weights, num_samples=1000, group = None):
       
       v1 = np.random.gamma(gammas[t1].k, gammas[t1].theta)
       v2 = np.random.gamma(gammas[t2].k, gammas[t2].theta)
-      if v1 > v2:
+      if v1 + v2 <1e-7:
+          continue
+      elif v1 > v2:
         aux.append(v1/(v1+v2))
       else:
         aux.append(v2/(v1+v2))
