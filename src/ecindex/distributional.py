@@ -38,7 +38,7 @@ def estimation_gamma_cens(W, ipcw_weights, k0, theta0, J=20):
     N = len(W)#np.sum(ipcw_weights)
 
     # percentiles used for estimation
-    base_percentiles = np.linspace(np.sqrt(0.01), np.sqrt(0.95), J)
+    base_percentiles = np.linspace(0.01, 0.95, J)
     w_eval = np.quantile(W_events, base_percentiles)
 
     #empirical moments
@@ -159,7 +159,7 @@ def estimation_gamma_weibull(Y, ipcw_weights, k0, theta_lambda0, a0, J=20):
     N = len(Y)#np.sum(ipcw_weights)
 
     # percentiles used for estimation
-    base_percentiles = np.linspace(np.sqrt(0.01), np.sqrt(0.95), J)
+    base_percentiles = np.linspace(0.01, 0.95, J)
     y_eval = np.quantile(Y_events, base_percentiles)
 
     #empirical moments
@@ -252,3 +252,120 @@ def ecindex_distribution(T, C, cumulative_baseline_hazard=None, num_samples=100,
     return ecindex_samples, gamma_params
 
 
+def random_initialization_gamma_weibull_groups(Y, ipcw_weights, Sub, subset_frac=0.7):
+    """
+    Random initial parameters for the subpopulation estimator.
+    For each group, a weighted random subset of that group is drawn, and the group's
+    survival curve is anchored so that it passes through the subset's median:
+        (1 + theta_g * lambda * y_med_g^a)^(-k_g) = 0.5
+    The Weibull shape a is shared. The reference group has theta_ref = 1/k_ref,
+    which fixes lambda; the other groups' theta_g follow from their own medians.
+
+    Returns k0s (dict), lambda0, a0, theta0s (dict, not for first group),
+    in the format expected by estimation_gamma_weibull.
+    """
+    Y = np.asarray(Y, dtype=float)
+    w = np.asarray(ipcw_weights, dtype=float)
+    Sub = np.asarray(Sub)
+
+    groups = list(np.unique(Sub))
+
+    ref_group = groups[0]
+
+    # shared Weibull shape
+    a_init = np.random.uniform(0.1, 2.0)
+
+    k0s, combined = {}, {}
+    for g in groups:
+        mask = Sub == g
+        Y_g, w_g = Y[mask], w[mask]
+        n_g = len(Y_g)
+        idx = np.random.choice(n_g, size=max(1, int(subset_frac * n_g)),
+                               replace=True, p=w_g / np.sum(w_g))
+        y_med = np.median(Y_g[idx])
+
+        k_g = np.random.uniform(0.1, 2.0)
+        # combined scale theta_g * lambda that puts the median of S_g at y_med
+        c_g = ((2.0 ** (1.0 / k_g)) - 1.0) / (y_med ** a_init)
+        k0s[g] = k_g
+        combined[g] = max(c_g, 1e-6)
+
+    # reference group: theta_ref = 1/k_ref  =>  lambda = c_ref * k_ref
+    lambda0 = combined[ref_group] * k0s[ref_group]
+    theta0s = {g: max(combined[g] / lambda0, 1e-6) for g in groups if g != ref_group}
+
+    return k0s, lambda0, a_init, theta0s
+
+def estimation_gamma_weibull_groups(Y, ipcw_weights, Sub, k0s, lambda0, a0,
+                             theta0s=None, J=20):
+    """
+    Gamma frailty per subpopulation with a shared Weibull baseline H0(t) = lambda * t**a.
+    Identifiability: only the reference group has mean frailty 1 (theta_ref = 1/k_ref).
+    The other groups have free (k_g, theta_g); their mean frailty k_g * theta_g is their
+    risk relative to the reference group.
+    Model: S_g(t) = (1 + theta_g * lambda * t**a) ** (-k_g)
+
+    - k0s: dict {group: initial k}
+    - lambda0: initial Weibull scale
+    - a0: initial Weibull shape
+    - theta0s: optional dict {group: initial theta} for the non-reference groups
+      (default 1/k0, i.e. start from mean frailty 1)
+    """
+    Y = np.asarray(Y, dtype=float)
+    w = np.asarray(ipcw_weights, dtype=float)
+    Sub = np.asarray(Sub)
+
+    groups = list(np.unique(Sub))
+
+    ref_group = groups[0]
+    groups.remove(ref_group)
+    groups = [ref_group] + groups# reference is always at position 0
+    n_sub = len(groups)
+
+    base_percentiles = np.linspace(0.01, 0.95, J)
+
+    # empirical moments, stacked in the order of `groups`
+    y_evals, m_hat = [], []
+    for g in groups:
+        mask = Sub == g
+        Y_g, w_g = Y[mask], w[mask]
+        y_g = np.quantile(Y_g[w_g > 0], base_percentiles)
+        F_g = np.array([np.sum((Y_g <= y) * w_g) for y in y_g]) / mask.sum()
+        y_evals.append(y_g)
+        m_hat.append(np.clip(1.0 - F_g, 1e-8, 1.0))
+    m_hat = np.concatenate(m_hat)
+
+    # x = [k_ref, k_2, ..., k_G, lambda, a, theta_2, ..., theta_G]
+    def unpack(x):
+        ks = x[:n_sub]
+        lam, a = x[n_sub], x[n_sub + 1]
+        thetas = np.concatenate([[1.0 / ks[0]], x[n_sub + 2:]])
+        return ks, thetas, lam, a
+
+    def calc_moment(ks, thetas, lam, a):
+        return np.concatenate([
+            (1.0 + thetas[j] * lam * y_evals[j] ** a) ** (-ks[j])
+            for j in range(n_sub)
+        ])
+
+    def objective(x, A):
+        ks, thetas, lam, a = unpack(x)
+        diff = m_hat - calc_moment(ks, thetas, lam, a)
+        return diff @ A @ diff
+
+    A = np.diag(1.0 / (m_hat ** 2 + 1e-8))
+
+    if theta0s is None:
+        theta0s = {g: 1.0 / k0s[g] for g in groups[1:]}
+    x0 = np.array([k0s[g] for g in groups] + [lambda0, a0]
+                  + [theta0s[g] for g in groups[1:]], dtype=float)
+    bounds = [(1e-5, None)] * len(x0)
+
+    result = minimize(objective, x0, args=(A,), bounds=bounds, method="SLSQP",
+                      options={"maxiter": 1000, "ftol": 1e-8})
+    if not result.success:
+        print(f"Warning: Optimizer did not fully converge. Message: {result.message}")
+
+    ks, thetas, lam, a = unpack(result.x)
+    gammas = {g: GammaParams(k=ks[j], theta=thetas[j]) for j, g in enumerate(groups)}
+    return gammas, WeibullParams(alpha=a, lambda_=lam)
