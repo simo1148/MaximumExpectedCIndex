@@ -3,8 +3,7 @@ from scipy.optimize import minimize
 from lifelines import KaplanMeierFitter
 from dataclasses import dataclass
 from scipy.special import betaln
-
-
+from collections.abc import Callable
 
 
 @dataclass
@@ -16,6 +15,173 @@ class GammaParams:
 class WeibullParams:
     alpha: float
     lambda_: float
+
+@dataclass
+class Baseline:
+    """Two parameter baseline cumulative hazard. everything on log scale for numerical stability"""
+    name: str
+    params_class: type
+    log_cum_hazard: Callable
+    param_estimation: Callable
+
+def _weibull_log_cum_hazard(t,alpha,log_lambda):
+    # H0 = lambda * t**alpha
+    return log_lambda + np.log(t)*alpha
+
+def _estimate_weibull_shape_scale_ols(Y, ipcw_weights, k, min_shape=1e-3):
+    """
+    Estimate initial Weibull (log_a , log_lambda) via OLS on
+    log(H0_hat(t)) vs log(t).
+    """
+
+
+    kmf = KaplanMeierFitter()
+    kmf.fit(durations=Y, event_observed=ipcw_weights>0)
+
+    # survival_function_ is indexed by timeline (time t) with column 'KM_estimate'
+    t = kmf.survival_function_.index.to_numpy(dtype=float)
+    s = kmf.survival_function_["KM_estimate"].to_numpy(dtype=float)
+    mask_middle = (t > 0) & (s > 0) & (s < 1)
+    t, s = t[mask_middle], s[mask_middle]
+
+    # H0_hat(t) = k * (S_hat(t)^(-1/k) - 1) = k * expm1(-log(S_hat(t)) / k)
+    h0_hat = k * np.expm1(-np.log(s) / k)
+
+    slope, intercept = np.polyfit(np.log(t), np.log(h0_hat), deg=1)
+    log_a = np.log(max(slope, min_shape))
+    log_lambda = intercept
+
+    return log_a, log_lambda
+
+def _log_survival(log_k, log_theta, log_H):
+    """log of (1+theta * H0(t))**(-k)"""
+    return -np.exp(log_k)*np.logaddexp(0.0, log_H + log_theta)
+
+LOG_BOUND = 20
+
+BASELINES ={
+    "weibull": Baseline("Weibull", WeibullParams, _weibull_log_cum_hazard, _estimate_weibull_shape_scale_ols)
+}
+
+
+
+def estimation_gamma_baseline(Y, ipcw_weights, log_k0, log_a0, log_lambda0, baseline="weibull", J=20):
+    """
+    Estimates the parameters of a gamma distribution given an unknown baseline cumulative hazard with two parameters.
+    - Y are the actual event times with no preprocessing.
+    - ipcw_weights are the inverse probability of censoring weights for each observation. Should be same size as W. For Harrel's C-index set weights 1 for uncensored and 0 for censored.
+    - log_k0: initial estimate of the shape parameter of the gamma distribution.
+    - log_lambda0: initial estimate of the scale paramater of the baseline.
+    - log_a0: initial estimate of the shape parameter of the baseline distribution.
+    - J is the number of quantiles used in the estimation. Requires J >= 2. 
+    """
+
+    baseline = BASELINES[baseline]
+
+    Y = np.asarray(Y, dtype=float)
+    Y_events = Y[ipcw_weights > 0]
+    N = len(Y)#np.sum(ipcw_weights)
+
+    # percentiles used for estimation
+    base_percentiles = np.linspace(0.01, 0.95, J)
+    y_eval = np.quantile(Y_events, base_percentiles)
+
+    #empirical moments
+    m_hat = np.array([np.sum((Y <= y) * ipcw_weights) / N  for y in y_eval])
+    m_hat = np.clip(1.0 - m_hat, 1e-8, 1.0)
+
+    #theoretical moments
+    def calc_moment(log_k, log_a, log_lambda):
+        """Assuming E[v]=1"""
+        log_H = baseline.log_cum_hazard(y_eval, np.exp(log_a), log_lambda)
+        return np.exp(_log_survival(log_k, -log_k, log_H))
+
+    # optimization objective
+    def objective(x, A):
+        log_k, log_a, log_lambda = x
+        m = calc_moment(log_k, log_a, log_lambda)
+        diff = m_hat - m
+        return diff.T @ A @ diff
+
+
+    # wighted matrix to normalize importance of each moment
+    A_weights = 1.0 / (m_hat**2 + 1e-8)
+    A = np.diag(A_weights)
+    
+        # initial guess and bounds for optimization
+    x0 = np.array([log_k0, log_a0, log_lambda0])
+    bounds = [(-LOG_BOUND, LOG_BOUND)]*len(x0)
+
+    result = minimize(
+        objective,
+        x0,
+        bounds=bounds,
+        args=(A,),
+        method='SLSQP',
+        options={'maxiter': 1000, 'ftol': 1e-8}
+    )
+
+    if not result.success:
+        print(f"Warning: Optimizer did not fully converge. Message: {result.message}")
+
+    k_est, a_est, lambda_est = np.exp(result.x)
+    theta_est = 1/k_est
+
+    return GammaParams(k=k_est, theta=theta_est), baseline.params_class(alpha=a_est, lambda_=lambda_est)
+
+def random_initialization_gamma_baseline(Y, ipcw_weights, baseline="weibull", subset_frac=0.7):
+
+    baseline = BASELINES[baseline]
+    Y = np.asarray(Y)
+
+    N = len(Y)
+    idx = np.random.choice(N, size=int(subset_frac * N), replace=True, p=ipcw_weights/np.sum(ipcw_weights))
+    Y_sub = Y[idx]
+    ipcw_weights_sub = ipcw_weights[idx]
+    
+    # Randomize the shape parameter
+    k_init = np.random.uniform(0.1, 2.0)
+    log_k = np.log(k_init)
+    log_a, log_lambda = baseline.param_estimation(Y_sub, ipcw_weights_sub, k_init)
+    
+
+    return log_k, log_a, log_lambda
+
+
+def ecindex_baseline(T, C, num_samples=100, baseline="weibull",
+                         fraction_initialization=0.7, J=20):
+    """
+    Draws num_samples estimates of the expected c-index, each from its own random initialization.
+    - T are the observed times, C the event indicator.
+    - num_samples is the number of random initializations, ie the size of the returned sample.
+    - fraction_initialization is the subset fraction used by the initializers.
+    Returns the sample of expected c-indices and the matching gamma parameters.
+    - J is the number of quantiles used in the estimation. Requires J >= 2.
+    """
+    gamma_params = []
+    ecindex_samples = []
+    G_fitter = KaplanMeierFitter()
+    G_fitter.fit(durations=T, event_observed=(1 - C))
+    G_times = G_fitter.survival_function_at_times(T).to_numpy()
+    ipcw_weights = C/G_times
+
+
+    # Administrative censoring to 0.
+    mask = np.isnan(ipcw_weights)
+    ipcw_weights[mask] = 0
+
+
+    for _ in range(num_samples):
+        # Randomly initialize parameters
+        log_k0, log_a0, log_lambda0 = random_initialization_gamma_baseline(T, ipcw_weights,baseline=baseline, subset_frac=fraction_initialization)
+        # Estimate parameters
+        gamma_param, weibull_param = estimation_gamma_baseline(T, ipcw_weights, log_k0, log_a0, log_lambda0, baseline=baseline, J=J)
+        gamma_params.append(gamma_param)
+        # Calculate expected C-index
+        ecindex_samples.append(expected_cindex_gamma(gamma_param))
+
+    return ecindex_samples, gamma_params
+
 
 
 
