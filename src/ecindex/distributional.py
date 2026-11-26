@@ -161,7 +161,7 @@ def estimation_gamma_baseline(Y, ipcw_weights, log_k0, log_a0, log_lambda0, base
     k_est, a_est, lambda_est = np.exp(result.x)
     theta_est = 1/k_est
 
-    return GammaParams(k=k_est, theta=theta_est), baseline.params_class(alpha=a_est, lambda_=lambda_est)
+    return GammaParams(k=k_est, theta=theta_est), baseline.params_class(alpha=a_est, lambda_=lambda_est), result.fun
 
 def random_initialization_gamma_baseline(Y, ipcw_weights, baseline="weibull", subset_frac=0.7):
 
@@ -204,17 +204,23 @@ def ecindex_baseline(T, C, num_samples=100, baseline="weibull",
     mask = np.isnan(ipcw_weights)
     ipcw_weights[mask] = 0
 
+    best_loss, g_param, w_param, ec_best = np.inf, None, None, 0.0
 
     for _ in range(num_samples):
         # Randomly initialize parameters
         log_k0, log_a0, log_lambda0 = random_initialization_gamma_baseline(T, ipcw_weights,baseline=baseline, subset_frac=fraction_initialization)
         # Estimate parameters
-        gamma_param, weibull_param = estimation_gamma_baseline(T, ipcw_weights, log_k0, log_a0, log_lambda0, baseline=baseline, J=J)
+        gamma_param, weibull_param, loss = estimation_gamma_baseline(T, ipcw_weights, log_k0, log_a0, log_lambda0, baseline=baseline, J=J)
         gamma_params.append(gamma_param)
         # Calculate expected C-index
         ecindex_samples.append(expected_cindex_gamma(gamma_param))
+        if loss < best_loss:
+            best_loss = loss
+            g_param = gamma_param
+            w_param = weibull_param
+            ec_best = ecindex_samples[-1]
 
-    return ecindex_samples, gamma_params
+    return ec_best, g_param, w_param
 
 
 
