@@ -13,8 +13,13 @@ class GammaParams:
 
 @dataclass
 class WeibullParams:
-    alpha: float
-    lambda_: float
+    alpha: float #shape
+    lambda_: float #scale
+
+@dataclass
+class GompertzParams:
+    alpha: float #shape
+    lambda_: float #scale
 
 @dataclass
 class Baseline:
@@ -27,6 +32,10 @@ class Baseline:
 def _weibull_log_cum_hazard(t,alpha,log_lambda):
     # H0 = lambda * t**alpha
     return log_lambda + np.log(t)*alpha
+
+def _gompertz_log_cum_hazard(t,alpha,log_lambda):
+    # H0 = (lambda/alpha) * (exp(alpha*t) - 1)
+    return np.log(np.expm1(alpha*t)) + log_lambda - np.log(alpha)
 
 def _estimate_weibull_shape_scale_ols(Y, ipcw_weights, k, min_shape=1e-3):
     """
@@ -53,14 +62,39 @@ def _estimate_weibull_shape_scale_ols(Y, ipcw_weights, k, min_shape=1e-3):
 
     return log_a, log_lambda
 
+def _estimate_gompertz_shape_scale_ols(Y, ipcw_weights, k, min_shape=1e-3):
+    """
+    Estimate initial Gompertz (log_a, log_lambda) via OLS on
+    log(H0_hat(t)) vs t using the large-t approximation:
+        log(H0(t)) ≈ a * t + log(lambda) - log(a)
+    """
+    kmf = KaplanMeierFitter()
+    kmf.fit(durations=Y, event_observed=ipcw_weights > 0)
+
+    t = kmf.survival_function_.index.to_numpy(dtype=float)
+    s = kmf.survival_function_["KM_estimate"].to_numpy(dtype=float)
+    mask_middle = (t > 0) & (s > 0) & (s < 1)
+    t, s = t[mask_middle], s[mask_middle]
+
+    # H0_hat(t) = k * (S_hat(t)^(-1/k) - 1) = k * expm1(-log(S_hat(t)) / k)
+    h0_hat = k * np.expm1(-np.log(s) / k)
+
+    slope, intercept = np.polyfit(t, np.log(h0_hat), deg=1)
+    a = max(slope, min_shape)
+    log_a = np.log(a)
+    log_lambda = intercept + log_a
+
+    return log_a, log_lambda
+
 def _log_survival(log_k, log_theta, log_H):
     """log of (1+theta * H0(t))**(-k)"""
     return -np.exp(log_k)*np.logaddexp(0.0, log_H + log_theta)
 
-LOG_BOUND = 20
+LOG_BOUND = 30
 
 BASELINES ={
-    "weibull": Baseline("Weibull", WeibullParams, _weibull_log_cum_hazard, _estimate_weibull_shape_scale_ols)
+    "weibull": Baseline("Weibull", WeibullParams, _weibull_log_cum_hazard, _estimate_weibull_shape_scale_ols),
+    "gompertz": Baseline("Gompertz", GompertzParams, _gompertz_log_cum_hazard, _estimate_gompertz_shape_scale_ols)
 }
 
 
