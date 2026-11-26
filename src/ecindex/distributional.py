@@ -220,7 +220,7 @@ def ecindex_baseline(T, C, num_samples=100, baseline="weibull",
             w_param = weibull_param
             ec_best = ecindex_samples[-1]
 
-    return ec_best, g_param, w_param
+    return ec_best, g_param, w_param, best_loss
 
 
 
